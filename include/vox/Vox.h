@@ -46,24 +46,48 @@ class BUFFER
 {
 public:
    virtual ~BUFFER () = default;
+   BUFFER (const BUFFER&) = delete;
+   BUFFER& operator= (const BUFFER&) = delete;
+   BUFFER (BUFFER&&) = delete;
+   BUFFER& operator= (BUFFER&&) = delete;
+
    virtual void SetData (const void* pSrc, size_t nSize, size_t nOffset = 0) = 0;
    virtual void GetData (void* pDst, size_t nSize, size_t nOffset = 0) = 0;
+
+protected:
+   BUFFER () = default;
 };
 
 class KERNEL
 {
 public:
    virtual ~KERNEL () = default;
+   KERNEL (const KERNEL&) = delete;
+   KERNEL& operator= (const KERNEL&) = delete;
+   KERNEL (KERNEL&&) = delete;
+   KERNEL& operator= (KERNEL&&) = delete;
+
+protected:
+   KERNEL () = default;
 };
 
 class DEVICE
 {
 public:
    virtual ~DEVICE () = default;
+   DEVICE (const DEVICE&) = delete;
+   DEVICE& operator= (const DEVICE&) = delete;
+   DEVICE (DEVICE&&) = delete;
+   DEVICE& operator= (DEVICE&&) = delete;
 
    static DEVICE* Create (Backend eBackend = Backend::Auto);
 
    virtual Backend GetBackend () const = 0;
+
+protected:
+   DEVICE () = default;
+
+public:
 
    virtual BUFFER* CreateBuffer (const BUFFER_DESC& desc) = 0;
    virtual KERNEL* CreateKernel (const void* pSpvBytes, size_t nSpvSize,
