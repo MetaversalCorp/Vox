@@ -40,12 +40,15 @@ public:
    ID3D12Resource* GetUploadResource () const   { return m_pUpload.Get (); }
    ID3D12Resource* GetReadbackResource () const { return m_pReadback.Get (); }
    size_t          GetSize () const             { return m_nSize; }
+   void            MarkGpuResults ();
 
 private:
    ComPtr<ID3D12Resource> m_pDefault;
    ComPtr<ID3D12Resource> m_pUpload;
    ComPtr<ID3D12Resource> m_pReadback;
    size_t                 m_nSize;
+   std::vector<uint8_t>   m_aShadow;
+   bool                   m_bHasGpuResults;
 };
 
 class DX12_KERNEL : public KERNEL

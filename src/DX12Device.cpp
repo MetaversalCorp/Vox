@@ -52,6 +52,8 @@ static std::string CrossCompileToHLSL (const void* pSpvBytes, size_t nSpvSize,
 
 DX12_BUFFER::DX12_BUFFER (ID3D12Device* pDevice, const BUFFER_DESC& desc)
    : m_nSize (desc.nSize)
+   , m_aShadow (desc.nSize, 0)
+   , m_bHasGpuResults (false)
 {
    D3D12_HEAP_PROPERTIES defaultHeap = {};
    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -91,6 +93,8 @@ DX12_BUFFER::~DX12_BUFFER ()
 
 void DX12_BUFFER::SetData (const void* pSrc, size_t nSize, size_t nOffset)
 {
+   std::memcpy (m_aShadow.data () + nOffset, pSrc, nSize);
+
    void* pMapped = nullptr;
    D3D12_RANGE readRange = { 0, 0 };
    m_pUpload->Map (0, &readRange, &pMapped);
@@ -100,12 +104,24 @@ void DX12_BUFFER::SetData (const void* pSrc, size_t nSize, size_t nOffset)
 
 void DX12_BUFFER::GetData (void* pDst, size_t nSize, size_t nOffset)
 {
-   void* pMapped = nullptr;
-   D3D12_RANGE readRange = { nOffset, nOffset + nSize };
-   m_pReadback->Map (0, &readRange, &pMapped);
-   std::memcpy (pDst, static_cast<const uint8_t*> (pMapped) + nOffset, nSize);
-   D3D12_RANGE writeRange = { 0, 0 };
-   m_pReadback->Unmap (0, &writeRange);
+   if (m_bHasGpuResults)
+   {
+      void* pMapped = nullptr;
+      D3D12_RANGE readRange = { nOffset, nOffset + nSize };
+      m_pReadback->Map (0, &readRange, &pMapped);
+      std::memcpy (pDst, static_cast<const uint8_t*> (pMapped) + nOffset, nSize);
+      D3D12_RANGE writeRange = { 0, 0 };
+      m_pReadback->Unmap (0, &writeRange);
+   }
+   else
+   {
+      std::memcpy (pDst, m_aShadow.data () + nOffset, nSize);
+   }
+}
+
+void DX12_BUFFER::MarkGpuResults ()
+{
+   m_bHasGpuResults = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +337,10 @@ void DX12_DEVICE::Finish ()
       m_pFence->SetEventOnCompletion (m_nFenceValue, m_pFenceEvent);
       WaitForSingleObject (m_pFenceEvent, INFINITE);
    }
+
+   for (size_t i = 0; i < m_aBoundBuffers.size (); i++)
+      m_aBoundBuffers[i].pBuffer->MarkGpuResults ();
+
    m_aBoundBuffers.clear ();
    m_aPushConstantData.clear ();
 }
