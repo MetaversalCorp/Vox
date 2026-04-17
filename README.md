@@ -46,6 +46,43 @@ Backends are enabled automatically based on the platform and available SDKs:
 - **DX12** — enabled on Windows (always)
 - **Metal** — enabled on macOS (always)
 
+## Testing
+
+Build with tests enabled and run the test binary with a SPIR-V file:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DSPIRV_CROSS_ROOT=/path/to/spirv-cross/install
+cmake --build build --config Release
+```
+
+Then run the test (the binary location varies by generator):
+
+```bash
+# macOS / Linux (Makefiles)
+./build/VoxTest test/test_proximity.spv
+
+# Windows (MSVC)
+build\Release\VoxTest.exe test\test_proximity.spv
+```
+
+A successful run looks like:
+
+```
+=== VoxTest ===
+
+--- CreateDevice ---
+  Backend: DX12
+--- CreateBuffer ---
+--- NullDevice ---
+--- ComputeDispatch (proximity kernel) ---
+  Loaded 1648 bytes of SPIR-V
+  Results: 3.000, 4.000, 5.000, 1.732
+
+14 / 14 passed
+```
+
+The backend name will vary by platform (DX12 on Windows, Vulkan on Linux, Metal on macOS).
+
 ## Usage
 
 ```cpp
@@ -70,6 +107,7 @@ vox::KERNEL* pKernel = pDevice->CreateKernel (pSpvBytes, nSpvSize, "main");
 pDevice->SetKernel (pKernel);
 pDevice->SetBuffer (pInput, 0, true);    // binding 0, read-only
 pDevice->SetBuffer (pOutput, 1, false);  // binding 1, read-write
+pDevice->SetPushConstants (&myConstants, sizeof (myConstants));  // optional
 pDevice->Dispatch ({ nGroupsX, 1, 1 });
 pDevice->Finish ();
 
