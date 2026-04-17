@@ -64,21 +64,27 @@ endif ()
 
 # SPIRV-Cross (required for DX12 and Metal shader translation)
 if (SPIRV_CROSS_ROOT)
-   set (CMAKE_PREFIX_PATH "${SPIRV_CROSS_ROOT}" ${CMAKE_PREFIX_PATH})
-endif ()
+   list (APPEND VOX_INCLUDE_DIRS "${SPIRV_CROSS_ROOT}/include")
 
-find_package (spirv_cross_core QUIET CONFIG)
-find_package (spirv_cross_hlsl QUIET CONFIG)
-find_package (spirv_cross_msl QUIET CONFIG)
+   if (WIN32)
+      list (APPEND VOX_LIBS
+         "${SPIRV_CROSS_ROOT}/lib/spirv-cross-hlsl.lib"
+         "${SPIRV_CROSS_ROOT}/lib/spirv-cross-glsl.lib"
+         "${SPIRV_CROSS_ROOT}/lib/spirv-cross-core.lib"
+      )
+      message (STATUS "Vox: SPIRV-Cross HLSL linked from ${SPIRV_CROSS_ROOT}")
+   endif ()
 
-if (spirv_cross_hlsl_FOUND)
-   list (APPEND VOX_LIBS spirv-cross-hlsl)
-   message (STATUS "Vox: SPIRV-Cross HLSL found")
-endif ()
-
-if (spirv_cross_msl_FOUND)
-   list (APPEND VOX_LIBS spirv-cross-msl)
-   message (STATUS "Vox: SPIRV-Cross MSL found")
+   if (APPLE)
+      list (APPEND VOX_LIBS
+         "${SPIRV_CROSS_ROOT}/lib/libspirv-cross-msl.a"
+         "${SPIRV_CROSS_ROOT}/lib/libspirv-cross-glsl.a"
+         "${SPIRV_CROSS_ROOT}/lib/libspirv-cross-core.a"
+      )
+      message (STATUS "Vox: SPIRV-Cross MSL linked from ${SPIRV_CROSS_ROOT}")
+   endif ()
+else ()
+   message (STATUS "Vox: SPIRV_CROSS_ROOT not set — DX12 and Metal backends will lack shader translation")
 endif ()
 
 # ---------------------------------------------------------------------------
@@ -93,6 +99,7 @@ target_include_directories (vox
       $<INSTALL_INTERFACE:include>
    PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${VOX_INCLUDE_DIRS}
 )
 
 target_compile_definitions (vox PRIVATE ${VOX_DEFINES})
