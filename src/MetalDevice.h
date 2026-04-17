@@ -48,10 +48,25 @@ public:
                  const char* szEntryPoint);
    ~METAL_KERNEL () override;
 
+   bool  IsValid () const          { return m_pPipelineState != nullptr; }
    void* GetPipelineState () const { return m_pPipelineState; }
+
+   int  GetMslIndexForBinding (uint32_t nSpvBinding, bool bReadOnly) const;
+   int  GetPushConstantIndex () const;
+   bool HasPushConstants () const { return m_bHasPushConstants; }
 
 private:
    void* m_pPipelineState;
+   bool  m_bHasPushConstants;
+   int   m_nPushConstantIndex;
+
+   struct BINDING_MAP
+   {
+      uint32_t nSpvBinding;
+      uint32_t nMslIndex;
+      bool     bReadOnly;
+   };
+   std::vector<BINDING_MAP> m_aBindingMap;
 };
 
 class METAL_DEVICE : public DEVICE

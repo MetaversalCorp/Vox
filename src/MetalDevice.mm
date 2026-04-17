@@ -28,8 +28,27 @@ namespace vox
 // Helpers
 // ---------------------------------------------------------------------------
 
-static std::string CrossCompileToMSL (const void* pSpvBytes, size_t nSpvSize)
+struct MSL_RESULT
 {
+   std::string sSource;
+   std::string sEntryPoint;
+
+   struct BUFFER_BINDING
+   {
+      uint32_t nSpvBinding;
+      uint32_t nMslIndex;
+      bool     bReadOnly;
+   };
+   std::vector<BUFFER_BINDING> aBufferBindings;
+
+   bool     bHasPushConstants;
+   uint32_t nPushConstantIndex;
+};
+
+static MSL_RESULT CrossCompileToMSL (const void* pSpvBytes, size_t nSpvSize)
+{
+   MSL_RESULT result = {};
+
    std::vector<uint32_t> aSpirv (nSpvSize / sizeof (uint32_t));
    std::memcpy (aSpirv.data (), pSpvBytes, nSpvSize);
 
@@ -39,7 +58,43 @@ static std::string CrossCompileToMSL (const void* pSpvBytes, size_t nSpvSize)
    opts.set_msl_version (2, 0);
    compiler.set_msl_options (opts);
 
-   return compiler.compile ();
+   result.sSource = compiler.compile ();
+
+   auto& aEntryPoints = compiler.get_entry_points_and_stages ();
+   for (auto& ep : aEntryPoints)
+   {
+      if (ep.execution_model == spv::ExecutionModelGLCompute)
+      {
+         result.sEntryPoint = compiler.get_cleansed_entry_point_name (
+            ep.name, ep.execution_model);
+         break;
+      }
+   }
+
+   spirv_cross::ShaderResources resources = compiler.get_shader_resources ();
+
+   for (auto& res : resources.storage_buffers)
+   {
+      uint32_t nSpvBinding = compiler.get_decoration (res.id, spv::DecorationBinding);
+      uint32_t nMslIndex   = compiler.get_automatic_msl_resource_binding (res.id);
+
+      spirv_cross::Bitset flags = compiler.get_buffer_block_flags (res.id);
+
+      MSL_RESULT::BUFFER_BINDING bb;
+      bb.nSpvBinding = nSpvBinding;
+      bb.nMslIndex   = nMslIndex;
+      bb.bReadOnly   = flags.get (spv::DecorationNonWritable);
+      result.aBufferBindings.push_back (bb);
+   }
+
+   result.bHasPushConstants = !resources.push_constant_buffers.empty ();
+   if (result.bHasPushConstants)
+   {
+      result.nPushConstantIndex = compiler.get_automatic_msl_resource_binding (
+         resources.push_constant_buffers[0].id);
+   }
+
+   return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,24 +139,64 @@ void METAL_BUFFER::GetData (void* pDst, size_t nSize, size_t nOffset)
 METAL_KERNEL::METAL_KERNEL (void* pDevice, const void* pSpvBytes, size_t nSpvSize,
                             const char* szEntryPoint)
    : m_pPipelineState (nullptr)
+   , m_bHasPushConstants (false)
+   , m_nPushConstantIndex (-1)
 {
    id<MTLDevice> device = (__bridge id<MTLDevice>) pDevice;
 
-   std::string sMSL = CrossCompileToMSL (pSpvBytes, nSpvSize);
-   NSString* pSource = [[NSString alloc] initWithUTF8String: sMSL.c_str ()];
+   MSL_RESULT msl = CrossCompileToMSL (pSpvBytes, nSpvSize);
+   if (msl.sSource.empty ())
+      return;
+
+   m_bHasPushConstants  = msl.bHasPushConstants;
+   m_nPushConstantIndex = msl.bHasPushConstants
+      ? static_cast<int> (msl.nPushConstantIndex) : -1;
+
+   for (auto& bb : msl.aBufferBindings)
+   {
+      BINDING_MAP bm;
+      bm.nSpvBinding = bb.nSpvBinding;
+      bm.nMslIndex   = bb.nMslIndex;
+      bm.bReadOnly   = bb.bReadOnly;
+      m_aBindingMap.push_back (bm);
+   }
+
+   NSString* pSource = [[NSString alloc] initWithUTF8String: msl.sSource.c_str ()];
 
    NSError* pError = nil;
    id<MTLLibrary> library = [device newLibraryWithSource: pSource
                                      options: nil
                                      error: &pError];
+   if (!library)
+      return;
 
-   NSString* pEntryName = [[NSString alloc] initWithUTF8String: szEntryPoint];
+   const char* szEntry = msl.sEntryPoint.empty () ? szEntryPoint
+                                                   : msl.sEntryPoint.c_str ();
+   NSString* pEntryName = [[NSString alloc] initWithUTF8String: szEntry];
    id<MTLFunction> function = [library newFunctionWithName: pEntryName];
+   if (!function)
+      return;
 
    id<MTLComputePipelineState> pipeline =
       [device newComputePipelineStateWithFunction: function error: &pError];
 
    m_pPipelineState = (__bridge_retained void*) pipeline;
+}
+
+int METAL_KERNEL::GetMslIndexForBinding (uint32_t nSpvBinding, bool bReadOnly) const
+{
+   for (size_t i = 0; i < m_aBindingMap.size (); i++)
+   {
+      if (m_aBindingMap[i].nSpvBinding == nSpvBinding &&
+          m_aBindingMap[i].bReadOnly == bReadOnly)
+         return static_cast<int> (m_aBindingMap[i].nMslIndex);
+   }
+   return -1;
+}
+
+int METAL_KERNEL::GetPushConstantIndex () const
+{
+   return m_nPushConstantIndex;
 }
 
 METAL_KERNEL::~METAL_KERNEL ()
@@ -192,7 +287,7 @@ void METAL_DEVICE::SetPushConstants (const void* pData, size_t nSize)
 
 void METAL_DEVICE::Dispatch (const DISPATCH_ARGS& args)
 {
-   if (!m_pCurrentKernel)
+   if (!m_pCurrentKernel || !m_pCurrentKernel->IsValid ())
       return;
 
    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>) m_pCommandQueue;
@@ -205,15 +300,25 @@ void METAL_DEVICE::Dispatch (const DISPATCH_ARGS& args)
 
    for (size_t i = 0; i < m_aBoundBuffers.size (); i++)
    {
+      int nMslIndex = m_pCurrentKernel->GetMslIndexForBinding (
+         m_aBoundBuffers[i].nBinding, m_aBoundBuffers[i].bReadOnly);
+
+      if (nMslIndex < 0)
+         continue;
+
       id<MTLBuffer> buffer = (__bridge id<MTLBuffer>) m_aBoundBuffers[i].pBuffer->GetHandle ();
-      [encoder setBuffer: buffer offset: 0 atIndex: m_aBoundBuffers[i].nBinding];
+      [encoder setBuffer: buffer offset: 0 atIndex: static_cast<NSUInteger> (nMslIndex)];
    }
 
-   if (!m_aPushConstantData.empty ())
+   if (m_pCurrentKernel->HasPushConstants () && !m_aPushConstantData.empty ())
    {
-      [encoder setBytes: m_aPushConstantData.data ()
-                 length: m_aPushConstantData.size ()
-                atIndex: m_aBoundBuffers.size ()];
+      int nPcIndex = m_pCurrentKernel->GetPushConstantIndex ();
+      if (nPcIndex >= 0)
+      {
+         [encoder setBytes: m_aPushConstantData.data ()
+                    length: m_aPushConstantData.size ()
+                   atIndex: static_cast<NSUInteger> (nPcIndex)];
+      }
    }
 
    NSUInteger nThreadsPerGroup = [pipeline maxTotalThreadsPerThreadgroup];
