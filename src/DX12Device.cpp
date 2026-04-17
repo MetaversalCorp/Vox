@@ -31,9 +31,25 @@ namespace vox
 // Helpers
 // ---------------------------------------------------------------------------
 
-static std::string CrossCompileToHLSL (const void* pSpvBytes, size_t nSpvSize,
-                                       const char* szEntryPoint)
+struct RESOURCE_BINDING
 {
+   uint32_t nBinding;
+   bool     bReadOnly;
+};
+
+struct HLSL_RESULT
+{
+   std::string                   sSource;
+   std::vector<RESOURCE_BINDING> aSrvBindings;
+   std::vector<RESOURCE_BINDING> aUavBindings;
+   bool                          bHasPushConstants;
+   uint32_t                      nPushConstantSize;
+};
+
+static HLSL_RESULT CrossCompileToHLSL (const void* pSpvBytes, size_t nSpvSize)
+{
+   HLSL_RESULT result = {};
+
    std::vector<uint32_t> aSpirv (nSpvSize / sizeof (uint32_t));
    std::memcpy (aSpirv.data (), pSpvBytes, nSpvSize);
 
@@ -43,7 +59,30 @@ static std::string CrossCompileToHLSL (const void* pSpvBytes, size_t nSpvSize,
    opts.shader_model = 50;
    compiler.set_hlsl_options (opts);
 
-   return compiler.compile ();
+   result.sSource = compiler.compile ();
+
+   spirv_cross::ShaderResources resources = compiler.get_shader_resources ();
+
+   for (auto& res : resources.storage_buffers)
+   {
+      uint32_t nBinding = compiler.get_decoration (res.id, spv::DecorationBinding);
+      spirv_cross::Bitset flags = compiler.get_buffer_block_flags (res.id);
+      RESOURCE_BINDING rb = { nBinding, flags.get (spv::DecorationNonWritable) };
+
+      if (rb.bReadOnly)
+         result.aSrvBindings.push_back (rb);
+      else
+         result.aUavBindings.push_back (rb);
+   }
+
+   result.bHasPushConstants = !resources.push_constant_buffers.empty ();
+   if (result.bHasPushConstants)
+   {
+      auto& pcType = compiler.get_type (resources.push_constant_buffers[0].base_type_id);
+      result.nPushConstantSize = static_cast<uint32_t> (compiler.get_declared_struct_size (pcType));
+   }
+
+   return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,39 +169,78 @@ void DX12_BUFFER::MarkGpuResults ()
 
 DX12_KERNEL::DX12_KERNEL (ID3D12Device* pDevice, const void* pSpvBytes, size_t nSpvSize,
                           const char* szEntryPoint)
+   : m_bHasPushConstants (false)
+   , m_nPushConstantDwords (0)
 {
-   std::string sHLSL = CrossCompileToHLSL (pSpvBytes, nSpvSize, szEntryPoint);
+   HLSL_RESULT hlsl = CrossCompileToHLSL (pSpvBytes, nSpvSize);
+
+   m_bHasPushConstants  = hlsl.bHasPushConstants;
+   m_nPushConstantDwords = (hlsl.nPushConstantSize + 3) / 4;
 
    ComPtr<ID3DBlob> pBytecode;
    ComPtr<ID3DBlob> pErrors;
-   D3DCompile (sHLSL.c_str (), sHLSL.size (), nullptr, nullptr, nullptr,
-               szEntryPoint, "cs_5_0", 0, 0, &pBytecode, &pErrors);
+   HRESULT hr = D3DCompile (hlsl.sSource.c_str (), hlsl.sSource.size (), nullptr,
+                            nullptr, nullptr, szEntryPoint, "cs_5_0", 0, 0,
+                            &pBytecode, &pErrors);
+   if (FAILED (hr))
+   {
+      if (pErrors)
+         std::printf ("  [Vox DX12] D3DCompile error: %s\n", (const char*) pErrors->GetBufferPointer ());
+      return;
+   }
 
-   // Root signature: root constants (32 DWORDs) + 16 UAV descriptors
-   D3D12_ROOT_PARAMETER aParams[2] = {};
+   // Build root signature dynamically from SPIRV-Cross reflection:
+   //   Param 0: root constants (push constants) at b0
+   //   Param 1+: root SRVs/UAVs using actual HLSL register numbers from SPIRV-Cross
+   std::vector<D3D12_ROOT_PARAMETER> aParams;
 
-   aParams[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-   aParams[0].Constants.ShaderRegister  = 0;
-   aParams[0].Constants.RegisterSpace   = 0;
-   aParams[0].Constants.Num32BitValues  = 32;
-   aParams[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+   D3D12_ROOT_PARAMETER pcParam = {};
+   pcParam.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+   pcParam.Constants.ShaderRegister  = 0;
+   pcParam.Constants.RegisterSpace   = 0;
+   pcParam.Constants.Num32BitValues  = (m_nPushConstantDwords > 0) ? m_nPushConstantDwords : 1;
+   pcParam.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+   aParams.push_back (pcParam);
 
-   D3D12_DESCRIPTOR_RANGE uavRange = {};
-   uavRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-   uavRange.NumDescriptors     = 16;
-   uavRange.BaseShaderRegister = 0;
+   for (size_t i = 0; i < hlsl.aSrvBindings.size (); i++)
+   {
+      D3D12_ROOT_PARAMETER srvParam = {};
+      srvParam.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_SRV;
+      srvParam.Descriptor.ShaderRegister = hlsl.aSrvBindings[i].nBinding;
+      srvParam.Descriptor.RegisterSpace  = 0;
+      srvParam.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+      uint32_t nRootIdx = static_cast<uint32_t> (aParams.size ());
+      aParams.push_back (srvParam);
 
-   aParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-   aParams[1].DescriptorTable.NumDescriptorRanges = 1;
-   aParams[1].DescriptorTable.pDescriptorRanges   = &uavRange;
-   aParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+      PARAM_MAP pm = { hlsl.aSrvBindings[i].nBinding, nRootIdx, true };
+      m_aParamMap.push_back (pm);
+   }
+
+   for (size_t i = 0; i < hlsl.aUavBindings.size (); i++)
+   {
+      D3D12_ROOT_PARAMETER uavParam = {};
+      uavParam.ParameterType             = D3D12_ROOT_PARAMETER_TYPE_UAV;
+      uavParam.Descriptor.ShaderRegister = hlsl.aUavBindings[i].nBinding;
+      uavParam.Descriptor.RegisterSpace  = 0;
+      uavParam.ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+      uint32_t nRootIdx = static_cast<uint32_t> (aParams.size ());
+      aParams.push_back (uavParam);
+
+      PARAM_MAP pm = { hlsl.aUavBindings[i].nBinding, nRootIdx, false };
+      m_aParamMap.push_back (pm);
+   }
 
    D3D12_ROOT_SIGNATURE_DESC rootDesc = {};
-   rootDesc.NumParameters = 2;
-   rootDesc.pParameters   = aParams;
+   rootDesc.NumParameters = static_cast<UINT> (aParams.size ());
+   rootDesc.pParameters   = aParams.data ();
 
    ComPtr<ID3DBlob> pSigBlob;
-   D3D12SerializeRootSignature (&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &pSigBlob, nullptr);
+   ComPtr<ID3DBlob> pSigErrors;
+   hr = D3D12SerializeRootSignature (&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                     &pSigBlob, &pSigErrors);
+   if (FAILED (hr))
+      return;
+
    pDevice->CreateRootSignature (0, pSigBlob->GetBufferPointer (),
       pSigBlob->GetBufferSize (), IID_PPV_ARGS (&m_pRootSignature));
 
@@ -171,6 +249,16 @@ DX12_KERNEL::DX12_KERNEL (ID3D12Device* pDevice, const void* pSpvBytes, size_t n
    psoDesc.CS.pShaderBytecode = pBytecode->GetBufferPointer ();
    psoDesc.CS.BytecodeLength  = pBytecode->GetBufferSize ();
    pDevice->CreateComputePipelineState (&psoDesc, IID_PPV_ARGS (&m_pPipelineState));
+}
+
+int DX12_KERNEL::GetRootParamForBinding (uint32_t nBinding, bool bReadOnly) const
+{
+   for (size_t i = 0; i < m_aParamMap.size (); i++)
+   {
+      if (m_aParamMap[i].nBinding == nBinding && m_aParamMap[i].bReadOnly == bReadOnly)
+         return static_cast<int> (m_aParamMap[i].nRootParam);
+   }
+   return -1;
 }
 
 DX12_KERNEL::~DX12_KERNEL ()
@@ -263,21 +351,22 @@ void DX12_DEVICE::SetPushConstants (const void* pData, size_t nSize)
 
 void DX12_DEVICE::Dispatch (const DISPATCH_ARGS& args)
 {
-   if (!m_pCurrentKernel)
+   if (!m_pCurrentKernel || !m_pCurrentKernel->IsValid ())
       return;
 
    m_pCommandAllocator->Reset ();
    m_pCommandList->Reset (m_pCommandAllocator.Get (), m_pCurrentKernel->GetPipelineState ());
    m_pCommandList->SetComputeRootSignature (m_pCurrentKernel->GetRootSignature ());
 
-   if (!m_aPushConstantData.empty ())
+   if (m_pCurrentKernel->HasPushConstants () && !m_aPushConstantData.empty ())
    {
-      m_pCommandList->SetComputeRoot32BitConstants (0,
+      m_pCommandList->SetComputeRoot32BitConstants (
+         m_pCurrentKernel->GetPushConstantParamIndex (),
          static_cast<UINT> (m_aPushConstantData.size () / 4),
          m_aPushConstantData.data (), 0);
    }
 
-   // Copy upload -> default for input buffers
+   // Copy upload -> default for all buffers
    for (size_t i = 0; i < m_aBoundBuffers.size (); i++)
    {
       DX12_BUFFER* pBuf = m_aBoundBuffers[i].pBuffer;
@@ -296,6 +385,24 @@ void DX12_DEVICE::Dispatch (const DISPATCH_ARGS& args)
       barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
       barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       m_pCommandList->ResourceBarrier (1, &barrier);
+   }
+
+   // Bind buffers as root SRVs/UAVs using the kernel's binding map
+   for (size_t i = 0; i < m_aBoundBuffers.size (); i++)
+   {
+      DX12_BUFFER* pBuf = m_aBoundBuffers[i].pBuffer;
+      D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = pBuf->GetDefaultResource ()->GetGPUVirtualAddress ();
+
+      int nParam = m_pCurrentKernel->GetRootParamForBinding (
+         m_aBoundBuffers[i].nBinding, m_aBoundBuffers[i].bReadOnly);
+
+      if (nParam < 0)
+         continue;
+
+      if (m_aBoundBuffers[i].bReadOnly)
+         m_pCommandList->SetComputeRootShaderResourceView (nParam, gpuAddr);
+      else
+         m_pCommandList->SetComputeRootUnorderedAccessView (nParam, gpuAddr);
    }
 
    m_pCommandList->Dispatch (args.nGroupsX, args.nGroupsY, args.nGroupsZ);

@@ -14,6 +14,9 @@
 
 #include <vox/Vox.h>
 #include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <vector>
 
 static int nTotal  = 0;
 static int nPassed = 0;
@@ -106,17 +109,123 @@ static void TestNullDevice ()
    TEST_ASSERT (pDevice == nullptr);
 }
 
+static std::vector<uint8_t> LoadFile (const char* szPath)
+{
+   std::vector<uint8_t> aBytes;
+   FILE* pFile = std::fopen (szPath, "rb");
+   if (!pFile)
+      return aBytes;
+
+   std::fseek (pFile, 0, SEEK_END);
+   long nSize = std::ftell (pFile);
+   std::fseek (pFile, 0, SEEK_SET);
+
+   aBytes.resize (static_cast<size_t> (nSize));
+   std::fread (aBytes.data (), 1, aBytes.size (), pFile);
+   std::fclose (pFile);
+
+   return aBytes;
+}
+
+static void TestComputeDispatch (const char* szSpvPath)
+{
+   std::printf ("--- ComputeDispatch (proximity kernel) ---\n");
+
+   std::vector<uint8_t> aSpv = LoadFile (szSpvPath);
+   if (aSpv.empty ())
+   {
+      std::printf ("  SKIP: could not load %s\n", szSpvPath);
+      return;
+   }
+   std::printf ("  Loaded %zu bytes of SPIR-V\n", aSpv.size ());
+   TEST_ASSERT (aSpv.size () > 16);
+
+   vox::DEVICE* pDevice = vox::DEVICE::Create ();
+   if (!pDevice)
+   {
+      std::printf ("  SKIP: no GPU backend available\n");
+      return;
+   }
+
+   // The proximity shader computes: distance(position.xyz, queryPoint.xyz)
+   // for each element. We'll test with 4 positions queried from the origin.
+   //
+   // Positions (vec4 each):
+   //   (3,0,0,0) -> distance = 3.0
+   //   (0,4,0,0) -> distance = 4.0
+   //   (0,0,5,0) -> distance = 5.0
+   //   (1,1,1,0) -> distance = sqrt(3) ~ 1.732
+
+   static const uint32_t N_COUNT = 4;
+   float aPositions[N_COUNT * 4] =
+   {
+      3.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 4.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 5.0f, 0.0f,
+      1.0f, 1.0f, 1.0f, 0.0f,
+   };
+
+   struct PUSH_CONSTANTS
+   {
+      float    dX, dY, dZ, dW;
+      uint32_t nCount;
+   };
+   PUSH_CONSTANTS pc = { 0.0f, 0.0f, 0.0f, 0.0f, N_COUNT };
+
+   vox::BUFFER_DESC inputDesc  = { sizeof (aPositions), true };
+   vox::BUFFER_DESC outputDesc = { N_COUNT * sizeof (float), true };
+
+   vox::BUFFER* pInput  = pDevice->CreateBuffer (inputDesc);
+   vox::BUFFER* pOutput = pDevice->CreateBuffer (outputDesc);
+
+   pInput->SetData (aPositions, sizeof (aPositions));
+
+   vox::KERNEL* pKernel = pDevice->CreateKernel (aSpv.data (), aSpv.size (), "main");
+   TEST_ASSERT (pKernel != nullptr);
+
+   if (pKernel)
+   {
+      pDevice->SetKernel (pKernel);
+      pDevice->SetBuffer (pInput, 0, true);
+      pDevice->SetBuffer (pOutput, 1, false);
+      pDevice->SetPushConstants (&pc, sizeof (pc));
+      pDevice->Dispatch ({ 1, 1, 1 });
+      pDevice->Finish ();
+
+      float aDistances[N_COUNT] = {};
+      pOutput->GetData (aDistances, sizeof (aDistances));
+
+      std::printf ("  Results: %.3f, %.3f, %.3f, %.3f\n",
+                   aDistances[0], aDistances[1], aDistances[2], aDistances[3]);
+
+      float dEpsilon = 0.001f;
+      TEST_ASSERT (std::fabs (aDistances[0] - 3.0f) < dEpsilon);
+      TEST_ASSERT (std::fabs (aDistances[1] - 4.0f) < dEpsilon);
+      TEST_ASSERT (std::fabs (aDistances[2] - 5.0f) < dEpsilon);
+      TEST_ASSERT (std::fabs (aDistances[3] - std::sqrt (3.0f)) < dEpsilon);
+
+      pDevice->DestroyKernel (pKernel);
+   }
+
+   pDevice->DestroyBuffer (pInput);
+   pDevice->DestroyBuffer (pOutput);
+   delete pDevice;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-int main ()
+int main (int nArgc, char* aArgv[])
 {
    std::printf ("=== VoxTest ===\n\n");
 
    TestCreateDevice ();
    TestCreateBuffer ();
    TestNullDevice ();
+
+   const char* szSpvPath = (nArgc > 1) ? aArgv[1] : "test_proximity.spv";
+   TestComputeDispatch (szSpvPath);
 
    std::printf ("\n%d / %d passed\n", nPassed, nTotal);
 

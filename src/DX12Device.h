@@ -58,12 +58,30 @@ public:
                 const char* szEntryPoint);
    ~DX12_KERNEL () override;
 
+   bool IsValid () const { return m_pPipelineState.Get () != nullptr; }
+
    ID3D12PipelineState* GetPipelineState () const { return m_pPipelineState.Get (); }
    ID3D12RootSignature* GetRootSignature () const { return m_pRootSignature.Get (); }
+
+   uint32_t GetPushConstantParamIndex () const { return 0; }
+   uint32_t GetPushConstantDwordCount () const { return m_nPushConstantDwords; }
+   bool     HasPushConstants () const           { return m_bHasPushConstants; }
+
+   int GetRootParamForBinding (uint32_t nBinding, bool bReadOnly) const;
 
 private:
    ComPtr<ID3D12PipelineState> m_pPipelineState;
    ComPtr<ID3D12RootSignature> m_pRootSignature;
+   bool     m_bHasPushConstants;
+   uint32_t m_nPushConstantDwords;
+
+   struct PARAM_MAP
+   {
+      uint32_t nBinding;
+      uint32_t nRootParam;
+      bool     bReadOnly;
+   };
+   std::vector<PARAM_MAP> m_aParamMap;
 };
 
 class DX12_DEVICE : public DEVICE
