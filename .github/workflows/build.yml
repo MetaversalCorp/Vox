@@ -123,8 +123,11 @@ jobs:
             native: true
           - platform: macos
             runs-on: macos-14
+            # macOS GitHub runners are virtualized without a real Metal GPU;
+            # VoxTest segfaults inside MTLCreateSystemDefaultDevice. Skip
+            # execution (build-only) — linux lavapipe covers dispatch cov.
             cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
-            native: true
+            native: false
           - platform: ios
             runs-on: macos-14
             cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DBUILD_TESTING=OFF"
