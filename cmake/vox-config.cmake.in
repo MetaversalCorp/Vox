@@ -1,0 +1,145 @@
+# Copyright 2026 Metaversal Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# vox-config.cmake — consumed by find_package(Vox CONFIG REQUIRED).
+#
+# Vox is a static archive. The DX12 and Metal backends internally call
+# into SPIRV-Cross to translate SPIR-V to HLSL / MSL, so the consuming
+# executable / library has to resolve SPIRV-Cross symbols at link time.
+# Because install-time absolute paths would be wrong on any other
+# machine, we locate SPIRV-Cross at the CONSUMER's configure time using
+# SpirvCross_ROOT as a hint (set by the consumer before find_package).
+#
+# Consumer usage:
+#
+#   set (SpirvCross_ROOT "${MY_LIBS}/SPIRV-Cross/install")
+#   find_package (Vox CONFIG REQUIRED PATHS "${MY_LIBS}/Vox/install")
+#   target_link_libraries (my_target PRIVATE vox::vox)
+
+@PACKAGE_INIT@
+
+if (TARGET vox::vox)
+   return ()
+endif ()
+
+# Locate the vox install root (the directory containing include/, lib/).
+set (_vox_prefix "${PACKAGE_PREFIX_DIR}")
+
+# ---------------------------------------------------------------------------
+# vox.lib / libvox.a
+# ---------------------------------------------------------------------------
+
+find_library (_vox_library
+   NAMES vox libvox
+   PATHS "${_vox_prefix}/lib"
+   NO_DEFAULT_PATH
+)
+
+if (NOT _vox_library)
+   set (Vox_FOUND FALSE)
+   set (Vox_NOT_FOUND_MESSAGE "vox archive not found under ${_vox_prefix}/lib")
+   return ()
+endif ()
+
+# ---------------------------------------------------------------------------
+# SPIRV-Cross — consumer is responsible for pointing us at it.
+# Vox's DX12 and Metal backends reference SPIRV-Cross symbols.
+# ---------------------------------------------------------------------------
+
+set (_vox_sc_libs)
+
+if (WIN32 OR APPLE)
+   if (NOT SpirvCross_ROOT AND NOT SPIRV_CROSS_ROOT)
+      set (Vox_FOUND FALSE)
+      set (Vox_NOT_FOUND_MESSAGE
+         "SpirvCross_ROOT is not set. Vox requires SPIRV-Cross on this platform. "
+         "Set SpirvCross_ROOT to the SPIRV-Cross install prefix before find_package(Vox).")
+      return ()
+   endif ()
+
+   # Accept either spelling; SpirvCross_ROOT is the CMake-idiomatic name.
+   if (NOT SpirvCross_ROOT)
+      set (SpirvCross_ROOT "${SPIRV_CROSS_ROOT}")
+   endif ()
+
+   find_library (_vox_sc_core NAMES spirv-cross-core
+      PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
+   find_library (_vox_sc_glsl NAMES spirv-cross-glsl
+      PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
+
+   if (WIN32)
+      find_library (_vox_sc_hlsl NAMES spirv-cross-hlsl
+         PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
+      if (_vox_sc_hlsl)
+         list (APPEND _vox_sc_libs "${_vox_sc_hlsl}")
+      endif ()
+   endif ()
+
+   if (APPLE)
+      find_library (_vox_sc_msl NAMES spirv-cross-msl
+         PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
+      if (_vox_sc_msl)
+         list (APPEND _vox_sc_libs "${_vox_sc_msl}")
+      endif ()
+   endif ()
+
+   # Link order: hlsl/msl reference glsl/core symbols, so put core last.
+   if (_vox_sc_glsl) list (APPEND _vox_sc_libs "${_vox_sc_glsl}") endif ()
+   if (_vox_sc_core) list (APPEND _vox_sc_libs "${_vox_sc_core}") endif ()
+
+   if (NOT _vox_sc_core OR NOT _vox_sc_glsl)
+      set (Vox_FOUND FALSE)
+      set (Vox_NOT_FOUND_MESSAGE
+         "SPIRV-Cross libraries not found under ${SpirvCross_ROOT}/lib. "
+         "Build SPIRV-Cross with HLSL (Windows) or MSL (Apple) enabled.")
+      return ()
+   endif ()
+endif ()
+
+# ---------------------------------------------------------------------------
+# Platform GPU backends
+# ---------------------------------------------------------------------------
+
+set (_vox_platform_libs)
+
+if (WIN32)
+   list (APPEND _vox_platform_libs d3d12 dxgi d3dcompiler)
+endif ()
+
+if (APPLE)
+   find_library (_vox_metal_fw      Metal)
+   find_library (_vox_foundation_fw Foundation)
+   list (APPEND _vox_platform_libs ${_vox_metal_fw} ${_vox_foundation_fw})
+endif ()
+
+# Vulkan is opportunistic — Vox includes the Vulkan backend only if the
+# SDK was present at its build time. find_package is QUIET so consumers
+# on non-Vulkan hosts don't see spurious warnings.
+find_package (Vulkan QUIET)
+if (Vulkan_FOUND)
+   list (APPEND _vox_platform_libs Vulkan::Vulkan)
+endif ()
+
+# ---------------------------------------------------------------------------
+# Imported target
+# ---------------------------------------------------------------------------
+
+add_library (vox::vox STATIC IMPORTED)
+set_target_properties (vox::vox PROPERTIES
+   IMPORTED_LOCATION             "${_vox_library}"
+   INTERFACE_INCLUDE_DIRECTORIES "${_vox_prefix}/include"
+   INTERFACE_LINK_LIBRARIES      "${_vox_sc_libs};${_vox_platform_libs}"
+)
+
+set (Vox_FOUND TRUE)

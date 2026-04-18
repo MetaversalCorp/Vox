@@ -118,22 +118,32 @@ target_link_libraries (vox PRIVATE ${VOX_LIBS})
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
+# We ship a hand-written vox-config.cmake (produced from
+# cmake/vox-config.cmake.in via configure_package_config_file) instead
+# of letting install(EXPORT) auto-generate one. The auto-generated form
+# bakes absolute paths to SPIRV-Cross into INTERFACE_LINK_LIBRARIES,
+# which breaks on any machine other than the one that built Vox. Our
+# template does SPIRV-Cross discovery at the consumer's configure time
+# using SpirvCross_ROOT as a hint.
 
 include (GNUInstallDirs)
+include (CMakePackageConfigHelpers)
 
 install (TARGETS vox
-   EXPORT  vox-targets
    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 install (DIRECTORY include/vox DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install (EXPORT vox-targets
-   FILE        vox-config.cmake
-   NAMESPACE   vox::
-   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vox
+configure_package_config_file (
+   cmake/vox-config.cmake.in
+   "${CMAKE_CURRENT_BINARY_DIR}/vox-config.cmake"
+   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vox
 )
+
+install (FILES "${CMAKE_CURRENT_BINARY_DIR}/vox-config.cmake"
+   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vox)
 
 # ---------------------------------------------------------------------------
 # Test executable (optional, controlled by BUILD_TESTING)
