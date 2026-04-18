@@ -95,8 +95,12 @@ if (WIN32 OR APPLE)
    endif ()
 
    # Link order: hlsl/msl reference glsl/core symbols, so put core last.
-   if (_vox_sc_glsl) list (APPEND _vox_sc_libs "${_vox_sc_glsl}") endif ()
-   if (_vox_sc_core) list (APPEND _vox_sc_libs "${_vox_sc_core}") endif ()
+   if (_vox_sc_glsl)
+      list (APPEND _vox_sc_libs "${_vox_sc_glsl}")
+   endif ()
+   if (_vox_sc_core)
+      list (APPEND _vox_sc_libs "${_vox_sc_core}")
+   endif ()
 
    if (NOT _vox_sc_core OR NOT _vox_sc_glsl)
       set (Vox_FOUND FALSE)
