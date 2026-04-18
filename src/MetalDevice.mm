@@ -60,7 +60,7 @@ static MSL_RESULT CrossCompileToMSL (const void* pSpvBytes, size_t nSpvSize)
 
    result.sSource = compiler.compile ();
 
-   auto& aEntryPoints = compiler.get_entry_points_and_stages ();
+   auto aEntryPoints = compiler.get_entry_points_and_stages ();
    for (auto& ep : aEntryPoints)
    {
       if (ep.execution_model == spv::ExecutionModelGLCompute)

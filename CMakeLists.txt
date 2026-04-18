@@ -18,6 +18,16 @@ project (Vox LANGUAGES CXX)
 set (CMAKE_CXX_STANDARD 17)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Cross-compile: Android/iOS toolchains default CMAKE_FIND_ROOT_PATH_MODE_*
+# to ONLY, which blocks find_package from honoring user-set ROOT vars (e.g.
+# SPIRV_CROSS_ROOT pointing to our downloaded artifact) and find_library
+# from searching outside the sysroot. Set BOTH so both resolve cleanly.
+if (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+   set (CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+   set (CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+   set (CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
+endif ()
+
 # ---------------------------------------------------------------------------
 # Sources common to all platforms
 # ---------------------------------------------------------------------------

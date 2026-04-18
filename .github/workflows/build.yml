@@ -1,0 +1,186 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # SPIRV-Cross — the one external dep. Static libs (core/glsl/hlsl/msl) per
+  # platform, cached by platform+tag. DX12/Windows and Metal/Apple backends
+  # use it to translate SPIR-V at kernel creation time.
+  # ---------------------------------------------------------------------------
+
+  spirv-cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runs-on: ubuntu-22.04
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release"
+            system-deps: "ninja-build"
+          - platform: macos
+            runs-on: macos-14
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
+          - platform: ios
+            runs-on: macos-14
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0"
+          - platform: android
+            runs-on: ubuntu-22.04
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26"
+            setup-ndk: true
+            system-deps: "ninja-build"
+    runs-on: ${{ matrix.runs-on }}
+    env:
+      SPIRV_CROSS_TAG: vulkan-sdk-1.3.296.0
+    steps:
+      - name: Install system deps
+        if: matrix.system-deps != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.system-deps }}
+
+      - name: Setup Android NDK
+        if: matrix.setup-ndk
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Cache SPIRV-Cross install
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: spirv-cross/install
+          key: spirv-cross-${{ matrix.platform }}-${{ env.SPIRV_CROSS_TAG }}-v1
+
+      - name: Clone SPIRV-Cross
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/SPIRV-Cross
+          ref: ${{ env.SPIRV_CROSS_TAG }}
+          path: spirv-cross/src
+
+      - name: Build SPIRV-Cross
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path || '' }}
+        run: |
+          CMAKE_ARGS="${{ matrix.cmake-args }}"
+          if [ -n "$ANDROID_NDK_ROOT" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake"
+          fi
+          cmake -S spirv-cross/src -B spirv-cross/build -GNinja \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/spirv-cross/install \
+            -DSPIRV_CROSS_SHARED=OFF \
+            -DSPIRV_CROSS_STATIC=ON \
+            -DSPIRV_CROSS_CLI=OFF \
+            -DSPIRV_CROSS_ENABLE_TESTS=OFF \
+            $CMAKE_ARGS
+          cmake --build spirv-cross/build --parallel $(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          cmake --install spirv-cross/build
+
+      - name: Upload SPIRV-Cross artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spirv-cross-${{ matrix.platform }}
+          path: spirv-cross/install
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # Vox — the library + test binary. Picks backends based on platform:
+  #   Linux: Vulkan
+  #   macOS/iOS: Metal (+ Vulkan on macOS if MoltenVK is present)
+  #   Android/Quest: Vulkan (via NDK libvulkan)
+  # Tests run on native builds only.
+  # ---------------------------------------------------------------------------
+
+  vox:
+    needs: spirv-cross
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runs-on: ubuntu-22.04
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release"
+            # mesa-vulkan-drivers provides lavapipe (software Vulkan ICD) so
+            # VoxTest can exercise the Vulkan backend without a physical GPU.
+            system-deps: "libvulkan-dev mesa-vulkan-drivers ninja-build"
+            native: true
+          - platform: macos
+            runs-on: macos-14
+            # macOS GitHub runners are virtualized without a real Metal GPU;
+            # VoxTest segfaults inside MTLCreateSystemDefaultDevice. Skip
+            # execution (build-only) — linux lavapipe covers dispatch cov.
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
+            native: false
+          - platform: ios
+            runs-on: macos-14
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DBUILD_TESTING=OFF"
+            native: false
+          - platform: android
+            runs-on: ubuntu-22.04
+            cmake-args: "-DCMAKE_BUILD_TYPE=Release -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DBUILD_TESTING=OFF"
+            setup-ndk: true
+            system-deps: "ninja-build"
+            native: false
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        if: matrix.system-deps != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.system-deps }}
+
+      - name: Setup Android NDK
+        if: matrix.setup-ndk
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Download SPIRV-Cross
+        uses: actions/download-artifact@v4
+        with:
+          name: spirv-cross-${{ matrix.platform }}
+          path: spirv-cross-install
+
+      - name: Build Vox
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path || '' }}
+        run: |
+          CMAKE_ARGS="${{ matrix.cmake-args }}"
+          if [ -n "$ANDROID_NDK_ROOT" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake"
+          fi
+          cmake -S . -B build -GNinja \
+            -DSPIRV_CROSS_ROOT=${{ github.workspace }}/spirv-cross-install \
+            $CMAKE_ARGS
+          cmake --build build --parallel $(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Run VoxTest
+        if: matrix.native
+        run: |
+          cd build
+          ./VoxTest ${{ github.workspace }}/test/test_proximity.spv
+
+      - name: Upload Vox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vox-${{ matrix.platform }}
+          path: |
+            build/libvox.a
+            build/VoxTest
+          if-no-files-found: ignore
+          retention-days: 7

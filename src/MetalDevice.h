@@ -17,6 +17,9 @@
 
 #include <vox/Vox.h>
 
+#include <cstdint>
+#include <vector>
+
 #ifdef __OBJC__
 #import <Metal/Metal.h>
 #endif
