@@ -73,13 +73,20 @@ if (WIN32 OR APPLE)
       set (SpirvCross_ROOT "${SPIRV_CROSS_ROOT}")
    endif ()
 
-   find_library (_vox_sc_core NAMES spirv-cross-core
+   # SPIRV-Cross sets CMAKE_DEBUG_POSTFIX=d on MSVC, so Debug installs have
+   # spirv-cross-cored.lib / spirv-cross-glsld.lib / etc. Release installs use
+   # the un-suffixed names. Since SpirvCross_ROOT already points at a single
+   # per-config install tree, only one variant is ever present — list both
+   # names and let find_library pick whichever exists. Release-first so that
+   # non-MSVC builds (which don't use the postfix at all) match on the first
+   # try and don't waste a stat() call.
+   find_library (_vox_sc_core NAMES spirv-cross-core spirv-cross-cored
       PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
-   find_library (_vox_sc_glsl NAMES spirv-cross-glsl
+   find_library (_vox_sc_glsl NAMES spirv-cross-glsl spirv-cross-glsld
       PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
 
    if (WIN32)
-      find_library (_vox_sc_hlsl NAMES spirv-cross-hlsl
+      find_library (_vox_sc_hlsl NAMES spirv-cross-hlsl spirv-cross-hlsld
          PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
       if (_vox_sc_hlsl)
          list (APPEND _vox_sc_libs "${_vox_sc_hlsl}")
@@ -87,7 +94,7 @@ if (WIN32 OR APPLE)
    endif ()
 
    if (APPLE)
-      find_library (_vox_sc_msl NAMES spirv-cross-msl
+      find_library (_vox_sc_msl NAMES spirv-cross-msl spirv-cross-msld
          PATHS "${SpirvCross_ROOT}/lib" NO_DEFAULT_PATH)
       if (_vox_sc_msl)
          list (APPEND _vox_sc_libs "${_vox_sc_msl}")
