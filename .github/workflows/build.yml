@@ -117,7 +117,9 @@ jobs:
           - platform: linux
             runs-on: ubuntu-22.04
             cmake-args: "-DCMAKE_BUILD_TYPE=Release"
-            system-deps: "libvulkan-dev ninja-build"
+            # mesa-vulkan-drivers provides lavapipe (software Vulkan ICD) so
+            # VoxTest can exercise the Vulkan backend without a physical GPU.
+            system-deps: "libvulkan-dev mesa-vulkan-drivers ninja-build"
             native: true
           - platform: macos
             runs-on: macos-14
